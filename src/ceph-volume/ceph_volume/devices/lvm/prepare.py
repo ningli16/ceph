@@ -1,6 +1,5 @@
 from __future__ import print_function
 import json
-import os
 import uuid
 from textwrap import dedent
 from ceph_volume.util import prepare as prepare_utils
@@ -36,7 +35,7 @@ def prepare_filestore(device, journal, secrets, id_=None, fsid=None):
     # get the latest monmap
     prepare_utils.get_monmap(osd_id)
     # prepare the osd filesystem
-    prepare_utils.osd_mkfs(osd_id, fsid)
+    prepare_utils.osd_mkfs_filestore(osd_id, fsid)
     # write the OSD keyring if it doesn't exist already
     prepare_utils.write_keyring(osd_id, cephx_secret)
 
@@ -71,7 +70,7 @@ def prepare_bluestore(data, block, wal, db, secrets, id_=None, fsid=None):
     # get the latest monmap
     prepare_utils.get_monmap(osd_id)
     # prepare the osd filesystem
-    prepare_utils.osd_mkfs(osd_id, fsid)
+    prepare_utils.osd_mkfs_bluestore(osd_id, fsid, keyring=cephx_secret)
     # write the OSD keyring if it doesn't exist already
     prepare_utils.write_keyring(osd_id, cephx_secret)
 
@@ -140,54 +139,24 @@ class Prepare(object):
         # allow re-using an id, in case a prepare failed
         osd_id = args.osd_id or prepare_utils.create_id(osd_fsid, json.dumps(secrets))
         if args.filestore:
-            vg_name, lv_name = args.data.split('/')
-            data_lv = api.get_lv(lv_name=lv_name, vg_name=vg_name)
-
-            # we must have either an existing data_lv or a newly created, so lets make
-            # sure that the tags are correct
-            if not data_lv:
-                raise RuntimeError('no data logical volume found with: %s' % args.data)
-
             if not args.journal:
                 raise RuntimeError('--journal is required when using --filestore')
 
-            journal_lv = self.get_lv(args.journal)
-            if journal_lv:
-                journal_device = journal_lv.lv_path
-                journal_uuid = journal_lv.lv_uuid
-                # we can only set tags on an lv, the pv (if any) can't as we
-                # aren't making it part of an lvm group (vg)
-                journal_lv.set_tags({
-                    'ceph.type': 'journal',
-                    'ceph.osd_fsid': osd_fsid,
-                    'ceph.osd_id': osd_id,
-                    'ceph.cluster_fsid': cluster_fsid,
-                    'ceph.journal_device': journal_device,
-                    'ceph.journal_uuid': journal_uuid,
-                    'ceph.data_device': data_lv.lv_path,
-                    'ceph.data_uuid': data_lv.lv_uuid,
-                })
+            data_lv = self.get_lv(args.data)
+            if not data_lv:
+                raise RuntimeError('no data logical volume found with: %s' % args.data)
 
-            # allow a file
-            elif os.path.isfile(args.journal):
-                journal_uuid = ''
-                journal_device = args.journal
-
-            # otherwise assume this is a regular disk partition
-            else:
-                journal_uuid = self.get_ptuuid(args.journal)
-                journal_device = args.journal
-
-            data_lv.set_tags({
-                'ceph.type': 'data',
+            tags = {
                 'ceph.osd_fsid': osd_fsid,
                 'ceph.osd_id': osd_id,
                 'ceph.cluster_fsid': cluster_fsid,
-                'ceph.journal_device': journal_device,
-                'ceph.journal_uuid': journal_uuid,
                 'ceph.data_device': data_lv.lv_path,
                 'ceph.data_uuid': data_lv.lv_uuid,
-            })
+            }
+
+            journal_device, journal_uuid, tags = self.setup_device('journal', args.journal, tags)
+
+            data_lv.set_tags(tags)
 
             prepare_filestore(
                 data_lv.lv_path,
@@ -197,7 +166,7 @@ class Prepare(object):
                 fsid=osd_fsid,
             )
         elif args.bluestore:
-            data_vg = api.get_vg(vg_name=vg_name)
+            data_vg = api.get_vg(vg_name=args.data)
             if disk.is_partition(args.data):
                 error = (
                     'Cannot use a partition (%s) for bluestore, ' % args.data,
