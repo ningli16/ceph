@@ -122,11 +122,11 @@ def link_block(block_device, osd_id):
 
 
 def link_wal(wal_device, osd_id):
-    _link_device(wal_device, 'wal', osd_id)
+    _link_device(wal_device, 'block.wal', osd_id)
 
 
 def link_db(db_device, osd_id):
-    _link_device(db_device, 'db', osd_id)
+    _link_device(db_device, 'block.db', osd_id)
 
 
 def get_monmap(osd_id):
@@ -152,7 +152,62 @@ def get_monmap(osd_id):
     ])
 
 
-def osd_mkfs(osd_id, fsid):
+def osd_mkfs_bluestore(osd_id, fsid, keyring=None, wal=False, db=False):
+    """
+    Create the files for the OSD to function. A normal call will look like:
+
+          ceph-osd --cluster ceph --mkfs --mkkey -i 0 \
+                   --monmap /var/lib/ceph/osd/ceph-0/activate.monmap \
+                   --osd-data /var/lib/ceph/osd/ceph-0 \
+                   --osd-uuid 8d208665-89ae-4733-8888-5d3bfbeeec6c \
+                   --keyring /var/lib/ceph/osd/ceph-0/keyring \
+                   --setuser ceph --setgroup ceph
+
+    In some cases it is required to use the keyring, when it is passed in as
+    a keywork argument it is used as part of the ceph-osd command
+    """
+    path = '/var/lib/ceph/osd/%s-%s/' % (conf.cluster, osd_id)
+    monmap = os.path.join(path, 'activate.monmap')
+    wal_path = os.path.join(path, 'block.wal')
+    db_path = os.path.join(path, 'block.db')
+
+    system.chown(path)
+
+    base_command = [
+        'sudo',
+        'ceph-osd',
+        '--cluster', conf.cluster,
+        '--mkfs',
+        '-i', osd_id,
+        '--monmap', monmap,
+    ]
+
+    supplementary_command = [
+        '--osd-data', path,
+        '--osd-uuid', fsid,
+        '--setuser', 'ceph',
+        '--setgroup', 'ceph'
+    ]
+
+    if keyring is not None:
+        base_command.extend(['--key', keyring])
+
+    if wal_path:
+        base_command.extend(
+            ['--bluestore-block-wal-path', wal_path]
+        )
+
+    if db_path:
+        base_command.extend(
+            ['--bluestore-block-db-path', db_path]
+        )
+
+    command = base_command + supplementary_command
+
+    process.run(command, obfuscate='--key')
+
+
+def osd_mkfs_filestore(osd_id, fsid):
     """
     Create the files for the OSD to function. A normal call will look like:
 
